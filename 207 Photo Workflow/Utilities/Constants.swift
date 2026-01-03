@@ -139,6 +139,12 @@ struct Constants {
         static let csvRemakePrefix = "SPA Ready CSV - Remake - "
         static let csvSMRemakePrefix = "SPA Ready CSV - SM Remake - "
     }
+    
+    // MARK: - GitHub Configuration
+    struct GitHub {
+        static let repoOwner = "jmutty"
+        static let repoName = "Workflow-App"
+    }
 }
 
 // MARK: - Type Aliases for Clarity

@@ -4,3 +4,4 @@ build/
 *.xcworkspace
 xcuserdata/
 DerivedData/
+Secrets.swift

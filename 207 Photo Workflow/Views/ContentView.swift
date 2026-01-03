@@ -78,6 +78,9 @@ struct ContentView: View {
             backgroundGradient
             
             VStack(spacing: 25) {
+                UpdateBannerView()
+                    .padding(.horizontal)
+                    
                 headerSection
                 folderSelectionSection
                 
@@ -91,6 +94,9 @@ struct ContentView: View {
                 statusBar
             }
             .padding(.bottom)
+            .onAppear {
+                UpdateService.shared.checkForUpdates()
+            }
 
             // Tiny Admin Mode button in bottom-right
             if jobManager.jobFolderURL != nil {
