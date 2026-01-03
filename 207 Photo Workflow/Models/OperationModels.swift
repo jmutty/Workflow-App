@@ -6,7 +6,9 @@ enum Operation: String, CaseIterable, Identifiable, Codable {
     case renameFiles = "Rename Files"
     case sortIntoTeams = "Sort Into Teams"
     case createSPACSV = "Create SPA-Ready CSV"
-    case sortTeamPhotos = "Sort Team Photos"
+    case createSeniorBannersCSV = "Create Senior Banner CSV"
+    case sortTeamPhotos = "Sort Team & Alt Background PNGs"
+    case adminMode = "Admin Mode"
     
     var id: String { rawValue }
     
@@ -18,8 +20,12 @@ enum Operation: String, CaseIterable, Identifiable, Codable {
             return "folder.badge.plus"
         case .createSPACSV:
             return "doc.text"
+        case .createSeniorBannersCSV:
+            return "flag.checkered"
         case .sortTeamPhotos:
             return "photo.stack"
+        case .adminMode:
+            return "gearshape"
         }
     }
     
@@ -31,8 +37,12 @@ enum Operation: String, CaseIterable, Identifiable, Codable {
             return "Organize photos into team folders"
         case .createSPACSV:
             return "Generate CSV for SPA processing"
+        case .createSeniorBannersCSV:
+            return "Parse order data, generate Senior Banners CSV, and copy banner PNGs"
         case .sortTeamPhotos:
-            return "Move team photos to upload folders"
+            return "Move team photos and ALT background PNGs to upload folders"
+        case .adminMode:
+            return "Sample from capture and rate images"
         }
     }
     
@@ -44,8 +54,12 @@ enum Operation: String, CaseIterable, Identifiable, Codable {
             return [Constants.Folders.extracted]
         case .createSPACSV:
             return [Constants.Folders.extracted]
+        case .createSeniorBannersCSV:
+            return [Constants.Folders.extracted]
         case .sortTeamPhotos:
             return [Constants.Folders.finishedTeams]
+        case .adminMode:
+            return [Constants.Folders.capture]
         }
     }
 }
@@ -79,7 +93,7 @@ enum OperationStatus: Equatable {
     var color: Color {
         switch self {
         case .ready:
-            return Constants.Colors.primaryGradientStart
+            return Constants.Colors.brandTint
         case .running:
             return Constants.Colors.warningOrange
         case .completed:
@@ -128,13 +142,19 @@ enum OperationStatus: Equatable {
 enum SourceFolder: String, CaseIterable {
     case output = "Output"
     case extracted = "Extracted"
+    case custom = "Custom"
     
     var folderName: String {
         rawValue
     }
     
-    func url(in jobFolder: URL) -> URL {
-        jobFolder.appendingPathComponent(folderName)
+    func url(in jobFolder: URL, customPath: URL? = nil) -> URL {
+        switch self {
+        case .output, .extracted:
+            return jobFolder.appendingPathComponent(folderName)
+        case .custom:
+            return customPath ?? jobFolder.appendingPathComponent("Custom")
+        }
     }
 }
 
@@ -162,11 +182,15 @@ struct OperationConfig {
     // Rename Files Configuration
     struct RenameConfig {
         var sourceFolder: SourceFolder = .extracted
+        var customSourcePath: URL? = nil
         var dataSource: DataSource = .csv
         var handleConflicts: ConflictHandling = .skip
+            // Default behavior: do not block on preflight errors
+            var bypassPreflightErrors: Bool = true
         var dryRun: Bool = true
         var createBackupBeforeRename: Bool = true
         var exportDryRunReport: Bool = true
+        var handleBuddySeparately: Bool = true
         
         enum ConflictHandling {
             case skip
@@ -211,18 +235,38 @@ enum ValidationSeverity: String {
     case info
 }
 
-struct ValidationIssue: Identifiable {
+struct ValidationIssue: Identifiable, Equatable {
     let id = UUID()
     let severity: ValidationSeverity
     let message: String
     let suggestion: String?
+    let affectedFiles: [URL]
+    
+    static func == (lhs: ValidationIssue, rhs: ValidationIssue) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    // Convenience initializer for backwards compatibility
+    init(severity: ValidationSeverity, message: String, suggestion: String?, affectedFiles: [URL] = []) {
+        self.severity = severity
+        self.message = message
+        self.suggestion = suggestion
+        self.affectedFiles = affectedFiles
+    }
 }
 
-struct ValidationReport {
+struct ValidationReport: Equatable {
     let operation: Operation
     let issues: [ValidationIssue]
     let requiredDiskSpace: Int64?
     let availableDiskSpace: Int64?
+    
+    static func == (lhs: ValidationReport, rhs: ValidationReport) -> Bool {
+        lhs.operation == rhs.operation &&
+        lhs.issues.count == rhs.issues.count &&
+        lhs.requiredDiskSpace == rhs.requiredDiskSpace &&
+        lhs.availableDiskSpace == rhs.availableDiskSpace
+    }
     
     var hasErrors: Bool {
         issues.contains { $0.severity == .error }
@@ -301,5 +345,114 @@ struct BatchOperation: Identifiable {
     
     var operationCount: Int {
         operations.count
+    }
+}
+
+// MARK: - Rename Revert Models
+struct RenameBackupInfo: Identifiable, Equatable {
+    let id = UUID()
+    let csvURL: URL
+    let timestamp: Date
+    let fileCount: Int
+    let sourceFolder: String // e.g., "Extracted", "Output"
+    
+    static func == (lhs: RenameBackupInfo, rhs: RenameBackupInfo) -> Bool {
+        lhs.csvURL == rhs.csvURL &&
+        lhs.timestamp == rhs.timestamp &&
+        lhs.fileCount == rhs.fileCount &&
+        lhs.sourceFolder == rhs.sourceFolder
+    }
+}
+
+struct RevertOperation: Identifiable, Equatable {
+    let id = UUID()
+    let currentURL: URL
+    let originalURL: URL
+    let currentName: String
+    let originalName: String
+    let status: RevertStatus
+    
+    enum RevertStatus: Equatable {
+        case pending
+        case notFound
+        case conflictAtDestination
+        case ready
+    }
+    
+    var canRevert: Bool {
+        status == .ready
+    }
+    
+    static func == (lhs: RevertOperation, rhs: RevertOperation) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+// MARK: - Issue Flag Models
+enum IssueFlag: String, CaseIterable, Identifiable {
+    case dismiss = "dismiss"
+    case addressOutside = "address_outside"
+    case addressInCSV = "address_in_csv"
+    
+    var id: String { rawValue }
+    
+    var displayName: String {
+        switch self {
+        case .dismiss:
+            return "Dismiss Issue"
+        case .addressOutside:
+            return "Address Outside App"
+        case .addressInCSV:
+            return "Address in CSV"
+        }
+    }
+    
+    var description: String {
+        switch self {
+        case .dismiss:
+            return "Hide this issue from future reviews"
+        case .addressOutside:
+            return "I will fix this outside the app"
+        case .addressInCSV:
+            return "I will edit the CSV to fix this"
+        }
+    }
+}
+
+@MainActor
+class IssueFlagStore: ObservableObject {
+    @Published private var dismissedIssues: Set<UUID> = []
+    @Published private var flaggedIssues: [UUID: IssueFlag] = [:]
+    
+    private var flagFileURL: URL?
+    
+    init() {
+        // We'll store flags in memory for now
+        // Could be extended to persist to disk if needed
+    }
+    
+    func isDismissed(_ issueId: UUID) -> Bool {
+        return dismissedIssues.contains(issueId) || flaggedIssues[issueId] != nil
+    }
+    
+    func flagIssue(_ issue: ValidationIssue, flag: IssueFlag, jobFolderPath: String) {
+        switch flag {
+        case .dismiss:
+            dismissedIssues.insert(issue.id)
+        case .addressOutside, .addressInCSV:
+            flaggedIssues[issue.id] = flag
+        }
+        
+        // Trigger UI update
+        objectWillChange.send()
+    }
+    
+    func clearFlags() {
+        dismissedIssues.removeAll()
+        flaggedIssues.removeAll()
+    }
+    
+    func getFlaggedIssues() -> [UUID: IssueFlag] {
+        return flaggedIssues
     }
 }

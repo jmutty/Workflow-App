@@ -27,12 +27,13 @@ protocol CSVServiceProtocol {
 
 // MARK: - Image Service Protocol
 protocol ImageServiceProtocol {
-    func loadImage(from url: URL) async throws -> NSImage
-    func getThumbnail(for url: URL, size: CGSize) async throws -> NSImage
-    func getImageMetadata(from url: URL) async throws -> ImageMetadata
+    @MainActor func loadImage(from url: URL) async throws -> NSImage
+    @MainActor func getThumbnail(for url: URL, size: CGSize) async throws -> NSImage
+    @MainActor func getImageMetadata(from url: URL) async throws -> ImageMetadata
     func validateImage(at url: URL) async throws -> Bool
     func validateImages(at urls: [URL]) async throws -> [(URL, Bool)]  // ADD THIS LINE
     func getImageDimensions(from url: URL) throws -> CGSize
+    func detectFaces(in image: NSImage) async -> [CGRect]
 }
 
 // MARK: - File Processing Service Protocol
@@ -53,11 +54,13 @@ protocol FileProcessingServiceProtocol {
 
 // MARK: - Validation Service Protocol
 protocol ValidationServiceProtocol {
+    @MainActor
     func preflightValidationForRename(jobFolder: URL,
                                       files: [URL],
                                       config: OperationConfig.RenameConfig,
                                       csvService: CSVServiceProtocol,
-                                      imageService: ImageServiceProtocol) async -> ValidationReport
+                                      imageService: ImageServiceProtocol,
+                                      flagStore: IssueFlagStore?) async -> ValidationReport
 }
 
 // MARK: - Operation History Protocol
@@ -166,6 +169,7 @@ struct ImageMetadata {
     let orientation: Int?
     let hasAlpha: Bool
     let bitDepth: Int?
+    let copyrightNotice: String?
     
     var aspectRatio: Double {
         guard dimensions.height > 0 else { return 0 }

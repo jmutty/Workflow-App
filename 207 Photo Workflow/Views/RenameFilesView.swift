@@ -25,6 +25,12 @@ struct RenameFilesView: View {
     @State private var manualFixNames: [URL: String] = [:]
     @State private var csvToEditURL: URL?
     
+    // Revert functionality
+    @State private var showingRevertDialog = false
+    
+    // CSV picker
+    @State private var showingCSVPicker = false
+    
     init(jobFolder: URL, jobManager: JobManager) {
         self.jobFolder = jobFolder
         self.jobManager = jobManager
@@ -32,12 +38,72 @@ struct RenameFilesView: View {
     }
     
     var body: some View {
+        mainContentView
+            .frame(minWidth: Constants.UI.renameWindowWidth,
+                   minHeight: Constants.UI.renameWindowHeight)
+            .preferredColorScheme(jobManager.colorScheme)
+            .onAppear {
+                print("🔘 RenameFilesView appeared! viewModel.lastRenameOperationId: \(String(describing: viewModel.lastRenameOperationId))")
+                Task { await viewModel.initialize() }
+            }
+            .onChange(of: totalIssueCount) { _, totalIssues in
+                if totalIssues == 0 { showingInlinePreflightFixes = false }
+            }
+            .onChange(of: viewModel.lastRenameOperationId) { _, _ in
+                showingInlinePreflightFixes = false
+            }
+            .sheet(isPresented: $showingPreview) {
+                previewSheet
+            }
+            .sheet(isPresented: $showingPreflight) {
+                preflightSheet
+            }
+            .sheet(isPresented: $showingValidationReport) {
+                validationReportSheet
+            }
+            .sheet(isPresented: $showingError) {
+                errorSheet
+            }
+            .sheet(isPresented: csvEditBinding) {
+                csvEditorSheet
+            }
+            .sheet(isPresented: $showingRevertDialog) {
+                RevertRenameView(viewModel: viewModel) {
+                    showingRevertDialog = false
+                    // Refresh after revert
+                    Task {
+                        await viewModel.analyzeFiles()
+                        await viewModel.detectAvailableBackups()
+                    }
+                }
+            }
+            .alert("Name Conflicts Detected", isPresented: $showingConflictDialog) {
+                conflictAlertButtons
+            } message: {
+                conflictAlertMessage
+            }
+            .sheet(isPresented: $showingConflictDetails) {
+                conflictDetailsSheet
+            }
+    }
+    
+    // MARK: - Computed Properties for Complex Expressions
+    private var totalIssueCount: Int {
+        (viewModel.validationReport?.errorCount ?? 0) + (viewModel.validationReport?.warningCount ?? 0)
+    }
+    
+    private var csvEditBinding: Binding<Bool> {
+        Binding(get: { csvToEditURL != nil }, set: { if !$0 { csvToEditURL = nil } })
+    }
+    
+    private var mainContentView: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 20) {
                     headerSection
                     configurationSection
-                    validationSummarySection  // only shows if issues exist
+                    revertSection
+                    validationSummarySection
                     if showingInlinePreflightFixes { preflightInlineFixes }
                     analysisSection
                 }
@@ -46,99 +112,143 @@ struct RenameFilesView: View {
 
             Divider()
 
-            // Persistent footer action bar
             HStack { actionButtons }
                 .padding(.horizontal)
                 .padding(.vertical, 10)
         }
-        .frame(minWidth: Constants.UI.renameWindowWidth,
-               minHeight: Constants.UI.renameWindowHeight)
-        .onAppear {
-            Task { await viewModel.initialize() }
+    }
+    
+    @ViewBuilder
+    private var previewSheet: some View {
+        if let url = previewURL {
+            ImagePreviewView(
+                imageURL: url,
+                allImageURLs: previewURLs.isEmpty ? nil : previewURLs,
+                initialIndex: previewStartIndex
+            )
+        } else {
+            Text("No file selected").frame(width: 400, height: 200)
         }
-        // Auto-collapse fixes panel when no issues or post-rename
-        .onChange(of: (viewModel.validationReport?.errorCount ?? 0) + (viewModel.validationReport?.warningCount ?? 0)) { totalIssues in
-            if totalIssues == 0 { showingInlinePreflightFixes = false }
+    }
+
+    // Helper to open preview without race between state and sheet
+    private func openPreview(url: URL, urls: [URL], index: Int) {
+        // Set all state first
+        previewURLs = urls
+        previewStartIndex = min(max(index, 0), max(urls.count - 1, 0))
+        previewURL = url
+        // Present sheet in next runloop to avoid blank initial render
+        DispatchQueue.main.async {
+            showingPreview = true
         }
-        .onChange(of: viewModel.lastRenameOperationId) { _ in
-            // After successful rename, hide fixes if any were open
-            showingInlinePreflightFixes = false
+    }
+    
+    @ViewBuilder
+    private var preflightSheet: some View {
+        if let report = viewModel.validationReport {
+            PreflightValidationView(
+                report: report,
+                onDismiss: { showingPreflight = false },
+                allowBypass: bypassBinding
+            )
+        } else {
+            Text("No report available").padding().frame(width: 400, height: 200)
         }
-        .sheet(isPresented: $showingPreview) {
-            if let url = previewURL {
-                ImagePreviewView(imageURL: url, allImageURLs: previewURLs.isEmpty ? nil : previewURLs, initialIndex: previewStartIndex)
-            } else {
-                Text("No file selected").frame(width: 400, height: 200)
-            }
-        }
-        .sheet(isPresented: $showingPreflight) {
-            if let report = viewModel.validationReport {
-                PreflightValidationView(report: report) { showingPreflight = false }
-            } else {
-                Text("No report available").padding().frame(width: 400, height: 200)
-            }
-        }
-        .sheet(isPresented: $showingValidationReport) {
-            if let validation = viewModel.poseCountValidation {
-                PoseCountValidationView(validation: validation) {
-                    showingValidationReport = false
+    }
+    
+    private var bypassBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.config.bypassPreflightErrors },
+            set: { viewModel.config.bypassPreflightErrors = $0 }
+        )
+    }
+    
+    @ViewBuilder
+    private var validationReportSheet: some View {
+        if let report = viewModel.validationReport, !report.issues.isEmpty {
+            IssueReviewView(
+                issues: report.issues,
+                jobFolderPath: viewModel.jobFolder.path,
+                onDismiss: { showingValidationReport = false },
+                onImagePreview: { url, urls, index in
+                    openPreview(url: url, urls: urls, index: index)
                 }
+            )
+        } else if let validation = viewModel.poseCountValidation {
+            PoseCountValidationView(validation: validation) {
+                showingValidationReport = false
             }
         }
-        .sheet(isPresented: $showingError) {
-            if let ctx = errorContext {
-                ErrorDetailView(
-                    title: "\(ctx.operation) Error",
-                    message: ctx.error.localizedDescription,
-                    suggestion: ctx.error.recoverySuggestion,
-                    details: ctx.affectedFiles.map { $0.path }.joined(separator: "\n"),
-                    onRetry: {
-                        showingError = false
-                        handleErrorRecovery(.retry, for: ctx)
-                    }
-                )
-                .frame(width: 600, height: 360)
-            } else {
-                Text("No error context").frame(width: 400, height: 200)
-            }
+    }
+    
+    @ViewBuilder
+    private var errorSheet: some View {
+        if let ctx = errorContext {
+            ErrorDetailView(
+                title: "\(ctx.operation) Error",
+                message: ctx.error.localizedDescription,
+                suggestion: ctx.error.recoverySuggestion,
+                details: ctx.affectedFiles.map { $0.path }.joined(separator: "\n"),
+                onRetry: {
+                    showingError = false
+                    handleErrorRecovery(.retry, for: ctx)
+                }
+            )
+            .frame(width: 600, height: 360)
+        } else {
+            Text("No error context").frame(width: 400, height: 200)
         }
-        .sheet(isPresented: Binding(get: { csvToEditURL != nil }, set: { if !$0 { csvToEditURL = nil } })) {
-            if let csvURL = csvToEditURL {
-                CSVEditorView(
-                    url: csvURL,
-                    sourceFolderURL: viewModel.config.sourceFolder.url(in: jobFolder),
-                    allImageURLs: viewModel.allImageURLsInSource(),
-                    onPreview: { fileURL in
-                        previewURLs = viewModel.allImageURLsInSource()
-                        previewURL = fileURL
-                        previewStartIndex = previewURLs.firstIndex(of: fileURL) ?? 0
-                        showingPreview = true
-                    },
-                    onClose: {
-                        csvToEditURL = nil
-                        Task { await viewModel.reloadCSVAndReanalyze() }
-                    }
-                )
-            } else {
-                Text("No CSV").frame(width: 400, height: 200)
-            }
+    }
+    
+    @ViewBuilder
+    private var csvEditorSheet: some View {
+        if let csvURL = csvToEditURL {
+            CSVEditorView(
+                url: csvURL,
+                sourceFolderURL: viewModel.config.sourceFolder.url(in: jobFolder, customPath: viewModel.config.customSourcePath),
+                allImageURLs: viewModel.allImageURLsInSource(),
+                onPreview: handlePreview,
+                onClose: handleCSVClose
+            )
+        } else {
+            Text("No CSV").frame(width: 400, height: 200)
         }
-        .alert("Name Conflicts Detected", isPresented: $showingConflictDialog) {
-            Button("Cancel") { }
-            Button("View Details") { showingConflictDetails = true }
-            Button("Skip Conflicts") {
-                Task { await executeRename(handling: .skip) }
-            }
-            Button("Add Number Suffixes") {
-                Task { await executeRename(handling: .addSuffix) }
-            }
-        } message: {
-            Text("Found \(viewModel.conflictCount) naming conflicts. Click View Details to see which files conflict, preview them, and manually fix names if needed.")
+    }
+    
+    private func handlePreview(_ fileURL: URL) {
+        previewURLs = viewModel.allImageURLsInSource()
+        previewURL = fileURL
+        previewStartIndex = previewURLs.firstIndex(of: fileURL) ?? 0
+        showingPreview = true
+    }
+    
+    private func handleCSVClose() {
+        csvToEditURL = nil
+        Task { await viewModel.reloadCSVAndReanalyze() }
+    }
+    
+    @ViewBuilder
+    private var conflictAlertButtons: some View {
+        Button("Cancel") { }
+        Button("View Details") { showingConflictDetails = true }
+        Button("Skip Conflicts") {
+            Task { await executeRename(handling: .skip) }
         }
-        .sheet(isPresented: $showingConflictDetails) {
-            ConflictDetailsViewEnhanced(operations: viewModel.filesToRename.filter { $0.hasConflict }, viewModel: viewModel) {
-                showingConflictDetails = false
-            }
+        Button("Add Number Suffixes") {
+            Task { await executeRename(handling: .addSuffix) }
+        }
+    }
+    
+    private var conflictAlertMessage: some View {
+        Text("Found \(viewModel.conflictCount) naming conflicts. Click View Details to see which files conflict, preview them, and manually fix names if needed.")
+    }
+    
+    private var conflictDetailsSheet: some View {
+        ConflictDetailsViewEnhanced(
+            operations: viewModel.filesToRename.filter { $0.hasConflict },
+            viewModel: viewModel
+        ) {
+            showingConflictDetails = false
         }
     }
     
@@ -158,7 +268,11 @@ struct RenameFilesView: View {
             VStack(alignment: .leading, spacing: 15) {
                 sourceFolderPicker
                 dataSourcePicker
+                Toggle("Handle Buddy Photos separately", isOn: $viewModel.config.handleBuddySeparately)
+                    .toggleStyle(.switch)
+                    .help("When enabled, files with 'Buddy' in the name are moved to a Buddy Photos subfolder and renumbered starting at 300 per subject.")
                 csvStatusIndicator
+                csvSelectionControls
             }
             .padding()
         }
@@ -206,6 +320,71 @@ struct RenameFilesView: View {
         }
     }
     
+    private var csvSelectionControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let csvURL = viewModel.currentCSVURL {
+                Text("Using CSV: \(csvURL.lastPathComponent)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("No CSV selected")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Button("Choose CSV File…") {
+                showingCSVPicker = true
+            }
+            .buttonStyle(.bordered)
+            .font(.caption)
+            .fileImporter(
+                isPresented: $showingCSVPicker,
+                allowedContentTypes: [.commaSeparatedText],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    if let url = urls.first {
+                        Task {
+                            await viewModel.useCSV(from: url)
+                        }
+                    }
+                case .failure(let error):
+                    print("❌ CSV selection failed: \(error)")
+                }
+            }
+        }
+    }
+    
+    private var revertSection: some View {
+        Group {
+            if !viewModel.availableBackups.isEmpty {
+                GroupBox {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(Constants.Colors.brandTint)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Rename Backups Available")
+                                .font(.headline)
+                            Text("\(viewModel.availableBackups.count) backup(s) found • Click to revert files to original names")
+                                .font(.caption)
+                                .foregroundColor(Constants.Colors.textSecondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Button("Revert to Original Filenames") {
+                            showingRevertDialog = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(12)
+                }
+            }
+        }
+    }
+    
     private var validationSummarySection: some View {
         Group {
             if let report = viewModel.validationReport,
@@ -224,6 +403,17 @@ struct RenameFilesView: View {
                             Spacer()
                             Button("Details") { showingPreflight = true }
                                 .buttonStyle(.bordered)
+                            Button("Review Issues") { showingValidationReport = true }
+                                .buttonStyle(.bordered)
+                            // Proceed is default ON now; show toggle to enforce blocking if desired
+                            if (report.errorCount + report.warningCount) > 0 {
+                                Toggle("Block on Errors", isOn: Binding(
+                                    get: { !viewModel.config.bypassPreflightErrors },
+                                    set: { viewModel.config.bypassPreflightErrors = !$0 }
+                                ))
+                                .toggleStyle(.switch)
+                                .help("When enabled, preflight errors will block the rename.")
+                            }
                             Button(showingInlinePreflightFixes ? "Hide Fixes" : "Fix Issues") {
                                 showingInlinePreflightFixes.toggle()
                                 if showingInlinePreflightFixes {
@@ -386,7 +576,7 @@ struct RenameFilesView: View {
                     }
                 )
                 .padding(.horizontal)
-            } else if !viewModel.filesToRename.isEmpty {
+            } else if !viewModel.filesToRename.isEmpty || (viewModel.validationReport != nil && viewModel.config.bypassPreflightErrors) {
                 analysisResultsView
             } else {
                 emptyStateView
@@ -417,6 +607,14 @@ struct RenameFilesView: View {
         HStack {
             Text("Files to rename: \(viewModel.filesToRename.count)")
                 .font(.headline)
+            
+            // Buddy count (best-effort) for quick visibility
+            let buddyCount = viewModel.filesToRename.filter { $0.originalName.lowercased().contains("buddy") }.count
+            if viewModel.config.handleBuddySeparately && buddyCount > 0 {
+                Text("Buddy: \(buddyCount)")
+                    .font(.caption)
+                    .foregroundColor(Constants.Colors.brandTint)
+            }
             
             if viewModel.hasConflicts {
                 HStack(spacing: 6) {
@@ -472,8 +670,8 @@ struct RenameFilesView: View {
                     }
                     .buttonStyle(.plain)
                     
-                    Image(systemName: "arrow.right")
-                        .foregroundColor(.blue)
+                        Image(systemName: "arrow.right")
+                            .foregroundColor(Constants.Colors.brandTint)
                     
                     Text(operation.newName)
                         .fontWeight(.medium)
@@ -520,6 +718,11 @@ struct RenameFilesView: View {
     
     private var actionButtons: some View {
         HStack(spacing: 15) {
+            // Debug: Always show the current state
+            Text("")
+                .onAppear {
+                    print("🔘 actionButtons rendered. lastRenameOperationId: \(String(describing: viewModel.lastRenameOperationId))")
+                }
             Button("Cancel") {
                 dismiss()
             }
@@ -571,6 +774,15 @@ struct RenameFilesView: View {
                     Task { await viewModel.undoLastRename() }
                 }
                 .buttonStyle(.bordered)
+                .onAppear {
+                    print("🔘 Undo button appeared! lastRenameOperationId: \(String(describing: viewModel.lastRenameOperationId))")
+                }
+            } else {
+                // Debug: Show why undo button is not showing
+                Text("")
+                    .onAppear {
+                        print("🔘 ❌ Undo button NOT showing. lastRenameOperationId: \(String(describing: viewModel.lastRenameOperationId))")
+                    }
             }
         }
     }
@@ -778,6 +990,7 @@ struct PoseCountValidationView: View {
 struct PreflightValidationView: View {
     let report: ValidationReport
     let onDismiss: () -> Void
+    var allowBypass: Binding<Bool>? = nil
     
     private func formatBytes(_ bytes: Int64) -> String {
         let fmt = ByteCountFormatter()
@@ -794,6 +1007,16 @@ struct PreflightValidationView: View {
                     .buttonStyle(.borderedProminent)
             }
             Divider()
+            if let allowBypass {
+                HStack(spacing: 10) {
+                    Toggle("Proceed Anyway (bypass preflight errors)", isOn: allowBypass)
+                        .toggleStyle(.switch)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(Constants.Colors.warningOrange)
+                        .help("Use with caution. Some operations may fail or skip files.")
+                }
+                .padding(.bottom, 6)
+            }
             if let req = report.requiredDiskSpace, let avail = report.availableDiskSpace {
                 Text("Backup estimate: \(formatBytes(req)) • Free: \(formatBytes(avail))")
                     .font(.caption)

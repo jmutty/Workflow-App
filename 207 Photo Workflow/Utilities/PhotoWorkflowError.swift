@@ -145,7 +145,7 @@ enum PhotoWorkflowError: LocalizedError {
         case .folderNotFound:
             return "Create the required folder or select a different job folder."
         case .accessDenied:
-            return "Check file permissions or try running the app with appropriate privileges."
+            return "macOS denied write access to this folder. Try: 1) Select a folder in your home directory (Documents, Desktop, etc.), 2) Check System Settings > Privacy & Security > Files and Folders for app permissions, or 3) Restart the app and try again."
         case .unableToCreateFolder:
             return "Check that you have write permissions for the location."
         case .unableToReadFile:
@@ -213,7 +213,7 @@ enum PhotoWorkflowError: LocalizedError {
         case .invalidJobFolder:
             return "Select a valid job folder with the correct structure."
         case .securityScopeError:
-            return "Grant folder access when prompted or select a different folder."
+            return "macOS denied access to this folder. Try: 1) Restart the app and select the folder again, 2) Check System Settings > Privacy & Security > Files and Folders, or 3) Try a different folder location."
             
         // Network Errors
         case .networkError:

@@ -11,6 +11,9 @@ class JobManager: ObservableObject {
     @Published var statusMessage: String = "Select a job folder to begin"
     @Published var activeOperation: Operation?
     @Published var operationHistory: [OperationResult] = []
+    @Published var appearanceIsDark: Bool {
+        didSet { UserDefaults.standard.set(appearanceIsDark, forKey: "AppearanceIsDark") }
+    }
     
     // MARK: - Private Properties
     private var securityScopedBookmark: Data?
@@ -37,9 +40,12 @@ class JobManager: ObservableObject {
         operationStatus.values.contains { $0.isActive }
     }
     
+    var colorScheme: ColorScheme? { appearanceIsDark ? .dark : .light }
+    
     // MARK: - Initialization
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+        self.appearanceIsDark = UserDefaults.standard.object(forKey: "AppearanceIsDark") as? Bool ?? false
         initializeOperationStatuses()
         loadSavedJobFolder()
     }
@@ -51,22 +57,49 @@ class JobManager: ObservableObject {
     
     // MARK: - Public Methods
     func setJobFolder(_ url: URL) throws {
+        print("🔐 Setting job folder: \(url.path)")
+        
         // Stop accessing previous folder
         if let previousURL = scopedResourceURL {
             previousURL.stopAccessingSecurityScopedResource()
             scopedResourceURL = nil
+            print("🔐 Stopped accessing previous folder")
+        }
+        
+        // Verify the URL is a directory
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            print("❌ Selected path is not a directory")
+            throw PhotoWorkflowError.invalidJobFolder(reason: "Selected path is not a valid folder")
         }
         
         // Start accessing new folder
+        print("🔐 Attempting to start security scoped access...")
         guard url.startAccessingSecurityScopedResource() else {
+            print("❌ Failed to start security scoped access")
             throw PhotoWorkflowError.securityScopeError(path: url.path)
         }
+        print("✅ Security scoped access granted")
         
         // Store for cleanup
         scopedResourceURL = url
         
+        // Test write permissions immediately
+        let testFileURL = url.appendingPathComponent(".write_test_\(UUID().uuidString)")
+        do {
+            try "test".write(to: testFileURL, atomically: true, encoding: .utf8)
+            try fileManager.removeItem(at: testFileURL)
+            print("✅ Write permissions verified")
+        } catch {
+            print("❌ Write permission test failed: \(error)")
+            url.stopAccessingSecurityScopedResource()
+            scopedResourceURL = nil
+            throw PhotoWorkflowError.accessDenied(path: url.path)
+        }
+        
         // Create bookmark for future access
         do {
+            print("🔖 Creating security bookmark...")
             securityScopedBookmark = try url.bookmarkData(
                 options: [.withSecurityScope],
                 includingResourceValuesForKeys: nil,
@@ -75,11 +108,14 @@ class JobManager: ObservableObject {
             
             // Save bookmark to UserDefaults
             UserDefaults.standard.set(securityScopedBookmark, forKey: "JobFolderBookmark")
+            print("✅ Bookmark saved successfully")
             
             jobFolderURL = url
             try validateJobFolder()
+            print("✅ Job folder validation passed")
             
         } catch {
+            print("❌ Bookmark creation failed: \(error)")
             url.stopAccessingSecurityScopedResource()
             scopedResourceURL = nil
             throw PhotoWorkflowError.securityScopeError(path: url.path)

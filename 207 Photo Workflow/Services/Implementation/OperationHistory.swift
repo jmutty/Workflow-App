@@ -2,9 +2,15 @@ import Foundation
 
 // MARK: - Operation History with Basic Backup/Undo
 class OperationHistory: OperationHistoryProtocol {
+    enum ChangeMode: String, Codable, Equatable {
+        case move
+        case copy
+    }
+    
     struct FileChange: Codable, Equatable {
         let originalURL: URL
         let newURL: URL
+        let mode: ChangeMode
     }
     
     struct OperationRecord: Identifiable, Codable, Equatable {
@@ -71,14 +77,23 @@ class OperationHistory: OperationHistoryProtocol {
         let record = records[index]
         guard record.reversible else { return }
         
-        // Move files back from newURL to originalURL
+        // Undo changes respecting mode
         for change in record.affectedFiles {
-            if fileManager.fileExists(atPath: change.newURL.path, isDirectory: nil) {
-                // If destination exists, try to remove
-                if fileManager.fileExists(atPath: change.originalURL.path, isDirectory: nil) {
-                    try fileManager.removeItem(at: change.originalURL)
+            switch change.mode {
+            case .move:
+                // Move files back from newURL to originalURL
+                if fileManager.fileExists(atPath: change.newURL.path, isDirectory: nil) {
+                    // If destination exists, try to remove
+                    if fileManager.fileExists(atPath: change.originalURL.path, isDirectory: nil) {
+                        try fileManager.removeItem(at: change.originalURL)
+                    }
+                    try fileManager.moveItem(at: change.newURL, to: change.originalURL)
                 }
-                try fileManager.moveItem(at: change.newURL, to: change.originalURL)
+            case .copy:
+                // For copies, simply delete the copied file at newURL
+                if fileManager.fileExists(atPath: change.newURL.path, isDirectory: nil) {
+                    try fileManager.removeItem(at: change.newURL)
+                }
             }
         }
         

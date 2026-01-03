@@ -12,7 +12,7 @@ struct ThumbnailTitleRow: View {
         Button(action: onTap) {
             HStack(spacing: 8) {
                 thumbnailView
-                    .frame(width: 34, height: 34)
+                    .frame(height: 34)
                     .cornerRadius(4)
                 Text(title)
                     .foregroundColor(.secondary)
@@ -30,8 +30,7 @@ struct ThumbnailTitleRow: View {
         if let thumbnail {
             Image(nsImage: thumbnail)
                 .resizable()
-                .scaledToFill()
-                .clipped()
+                .scaledToFit()
         } else {
             ZStack {
                 Color.gray.opacity(0.2)
@@ -40,7 +39,7 @@ struct ThumbnailTitleRow: View {
         }
     }
     
-    private func loadThumb() async {
+    @MainActor private func loadThumb() async {
         do {
             let img = try await imageService.getThumbnail(for: url, size: CGSize(width: 64, height: 64))
             thumbnail = img

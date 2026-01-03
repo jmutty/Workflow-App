@@ -15,6 +15,7 @@ struct CreateSPACSVView: View {
     @State private var previewURLs: [URL] = []
     @State private var showingTemplateSelection = false
     @State private var showingError = false
+    @State private var showManualList = false
     
     init(jobFolder: URL, jobManager: JobManager) {
         self.jobFolder = jobFolder
@@ -68,6 +69,7 @@ struct CreateSPACSVView: View {
             footer
         }
         .frame(width: Constants.UI.csvWindowWidth, height: Constants.UI.csvWindowHeight)
+        .preferredColorScheme(jobManager.colorScheme)
         .onAppear {
             viewModel.loadExistingCSVIfPresent()
             Task { await runAnalyze() }
@@ -103,6 +105,7 @@ struct CreateSPACSVView: View {
         .sheet(isPresented: $showingImagePreview) {
             if let url = previewURL {
                 ImagePreviewView(imageURL: url, allImageURLs: previewURLs, initialIndex: previewURLs.firstIndex(of: url) ?? 0)
+                    .id(url)
             } else {
                 Text("No image selected").frame(width: 300, height: 200)
             }
@@ -127,33 +130,30 @@ struct CreateSPACSVView: View {
             Text("Create SPA-Ready CSV").font(.title)
             Text("Job Folder: \(jobFolder.lastPathComponent)")
                 .font(.subheadline).foregroundColor(.secondary)
-        }.padding(.top, 8)
+        }
+        .padding(.top, 8)
     }
     
     private var configuration: some View {
-        GroupBox("Configuration") {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Template Assignment", selection: $viewModel.templateMode) {
-                    Text("Same for all teams").tag(CreateSPACSVViewModel.TemplateMode.sameForAll)
-                    Text("Per team").tag(CreateSPACSVViewModel.TemplateMode.perTeam)
-                }
-                .pickerStyle(.segmented)
-                Toggle("Include subfolders", isOn: $viewModel.includeSubfolders)
-                HStack {
-                    if viewModel.hasAnalyzedData {
-                        Button("Configure Templates") { showingTemplateSelection = true }
-                            .buttonStyle(.bordered)
-                    }
-                    if viewModel.templatesConfigured {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-                            Text("Templates configured").font(.caption)
-                        }
+        Button(action: { showingTemplateSelection = true }) {
+            HStack(spacing: 10) {
+                Image(systemName: "paintbrush").foregroundColor(.white)
+                Text("Configure Templates").foregroundColor(.white).font(.headline)
+                Spacer()
+                if viewModel.templatesConfigured {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.white)
+                        Text("Configured").font(.caption).foregroundColor(.white)
                     }
                 }
             }
-            .padding()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .background(Constants.Colors.brandTint)
+            .cornerRadius(12)
         }
+        .disabled(!viewModel.hasAnalyzedData)
+        .padding(.horizontal, 8)
     }
     
     private var analysisSection: some View {
@@ -167,9 +167,16 @@ struct CreateSPACSVView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Photos analyzed: \(viewModel.totalPhotoCount)").font(.headline)
                             Text("Regular photos: \(viewModel.regularPhotos.count)").font(.subheadline)
-                            Text("Manual photos: \(viewModel.manualPhotos.count)")
-                                .font(.subheadline)
+                            HStack(spacing: 6) {
+                                Button(action: { withAnimation { showManualList.toggle() } }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: showManualList ? "chevron.down" : "chevron.right")
+                                        Text("Manual photos: \(viewModel.manualPhotos.count)")
+                                    }
+                                }
+                                .buttonStyle(.plain)
                                 .foregroundColor(viewModel.manualPhotos.count > 0 ? Constants.Colors.warningOrange : .secondary)
+                            }
                             Text("Teams detected: \(viewModel.detectedTeams.count)").font(.subheadline)
                             if viewModel.missingSecondPoseCount > 0 {
                                 HStack(spacing: 6) {
@@ -180,6 +187,23 @@ struct CreateSPACSVView: View {
                             }
                         }
                         Spacer()
+                        if showManualList && !viewModel.manualPhotos.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Manual filenames:").font(.caption).foregroundColor(.secondary)
+                                ScrollView {
+                                    LazyVStack(alignment: .leading, spacing: 4) {
+                                        ForEach(viewModel.manualPhotos, id: \.self) { rec in
+                                            Text(rec.fileName)
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                                .textSelection(.enabled)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 140)
+                            }
+                            .padding(.top, 6)
+                        }
                     }
                     if !viewModel.detectedTeams.isEmpty {
                         Divider()
@@ -191,7 +215,7 @@ struct CreateSPACSVView: View {
                                         .font(.caption)
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 4)
-                                        .background(Color.blue.opacity(0.1))
+                                        .background(Constants.Colors.brandSoftFill)
                                         .cornerRadius(4)
                                 }
                             }
@@ -220,6 +244,15 @@ struct CreateSPACSVView: View {
             if viewModel.csvGenerated {
                 Button("Preview CSV") { Task { await openCSVInEditor() } }
                     .buttonStyle(.bordered)
+                
+                if viewModel.lastCSVOperationId != nil {
+                    Button("Undo CSV Save") { 
+                        Task { await undoCSVOperation() }
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Restore previous CSV file and undo folder changes")
+                }
+                
                 Button("Save & Complete") { Task { await confirmSaveAndComplete() } }
                 .buttonStyle(.borderedProminent)
             }
@@ -294,6 +327,18 @@ struct CreateSPACSVView: View {
             await runSave()
         } else {
             await runSave()
+        }
+    }
+    
+    private func undoCSVOperation() async {
+        jobManager.updateOperationStatus(.createSPACSV, status: .running(progress: nil))
+        await viewModel.undoLastCSVOperation()
+        
+        if let err = viewModel.lastError {
+            jobManager.updateOperationStatus(.createSPACSV, status: .error(err))
+            showingError = true
+        } else {
+            jobManager.updateOperationStatus(.createSPACSV, status: .completed(Date()))
         }
     }
 }

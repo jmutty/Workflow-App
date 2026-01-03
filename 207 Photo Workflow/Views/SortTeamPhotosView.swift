@@ -32,7 +32,7 @@ struct SortTeamPhotosView: View {
         .onAppear { Task { await runAnalyze() } }
         .sheet(isPresented: $showingError) {
             ErrorDetailView(
-                title: "Sort Team Photos Error",
+                title: "Sort Team & Alt Background PNGs Error",
                 message: viewModel.lastError ?? "Unknown error",
                 suggestion: "Check folder structure and permissions, then try again.",
                 details: nil,
@@ -40,11 +40,12 @@ struct SortTeamPhotosView: View {
             )
             .frame(width: 600, height: 360)
         }
+        .preferredColorScheme(jobManager.colorScheme)
     }
     
     private var header: some View {
         VStack(spacing: 6) {
-            Text("Sort Team Photos").font(.title)
+            Text("Sort Team & Alt Background PNGs").font(.title)
             Text("Job Folder: \(jobFolder.lastPathComponent)")
                 .font(.subheadline).foregroundColor(.secondary)
         }
@@ -94,7 +95,7 @@ struct SortTeamPhotosView: View {
                                     HStack(spacing: 6) {
                                         Text(team).font(.caption)
                                             .padding(.horizontal, 8).padding(.vertical, 4)
-                                            .background(Color.blue.opacity(0.1)).cornerRadius(4)
+                                            .background(Constants.Colors.brandSoftFill).cornerRadius(4)
                                         Text("(\(count))").font(.caption2).foregroundColor(.secondary)
                                     }
                                 }
@@ -136,7 +137,7 @@ struct SortTeamPhotosView: View {
                 .buttonStyle(.bordered)
                 .disabled(viewModel.isAnalyzing)
             if viewModel.analysisReady && !viewModel.foundFiles.isEmpty {
-                Button("Sort Team Photos") {
+                Button("Sort Team & Alt Background PNGs") {
                     Task { await runExecute() }
                 }
                 .buttonStyle(.borderedProminent)

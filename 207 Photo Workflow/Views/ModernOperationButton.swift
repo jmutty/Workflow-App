@@ -42,7 +42,7 @@ struct ModernOperationButton: View {
     // MARK: - Subviews
     private var iconSection: some View {
         ZStack {
-            // Background circle
+            // Background circle (brand accent for focus/hover, system otherwise)
             Circle()
                 .fill(iconBackgroundGradient)
                 .frame(width: 56, height: 56)
@@ -68,7 +68,7 @@ struct ModernOperationButton: View {
         VStack(spacing: 4) {
             Text(operation.rawValue)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(.primary)
                 .multilineTextAlignment(.center)
             
             statusText
@@ -104,8 +104,8 @@ struct ModernOperationButton: View {
     private var iconBackgroundGradient: LinearGradient {
         LinearGradient(
             colors: isHovered && !isDisabled ?
-                [statusColor, statusColor.opacity(0.7)] :
-                [statusColor.opacity(0.2), statusColor.opacity(0.1)],
+                [Constants.Colors.brandTint, Constants.Colors.brandTint.opacity(0.8)] :
+                [Color(NSColor.controlBackgroundColor), Color(NSColor.windowBackgroundColor)],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
@@ -122,7 +122,7 @@ struct ModernOperationButton: View {
                     )
             )
             .shadow(
-                color: isHovered && !isDisabled ? statusColor.opacity(0.3) : .clear,
+                color: isHovered && !isDisabled ? Constants.Colors.brandTint.opacity(0.2) : .clear,
                 radius: 10
             )
     }

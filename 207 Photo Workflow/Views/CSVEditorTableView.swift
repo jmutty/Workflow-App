@@ -27,6 +27,10 @@ struct CSVEditorTableView: NSViewRepresentable {
         table.delegate = context.coordinator
         table.dataSource = context.coordinator
         table.doubleAction = #selector(Coordinator.didDoubleClick(_:))
+        table.action = #selector(Coordinator.didClick(_:))
+        table.target = context.coordinator
+        table.allowsTypeSelect = true
+        table.allowsEmptySelection = true
         
         context.coordinator.tableView = table
         configureColumns(table)
@@ -42,8 +46,24 @@ struct CSVEditorTableView: NSViewRepresentable {
         context.coordinator.onChange = onChange
         context.coordinator.headers = headers
         context.coordinator.rows = rows
-        syncColumnsIfNeeded(table)
-        table.reloadData()
+
+        // Defer heavy table updates to avoid layout recursion warnings
+        if context.coordinator.pendingReload { return }
+        let needsHeaderSync = (table.tableColumns.count != headers.count)
+            || zip(table.tableColumns.map { $0.title }, headers).contains { $0 != $1 }
+        let needsDataReload = (context.coordinator.lastHeadersCount != headers.count)
+            || (context.coordinator.lastRowsCount != rows.count)
+        guard needsHeaderSync || needsDataReload else { return }
+        context.coordinator.pendingReload = true
+        DispatchQueue.main.async {
+            if needsHeaderSync {
+                syncColumnsIfNeeded(table)
+            }
+            table.reloadData()
+            context.coordinator.lastHeadersCount = headers.count
+            context.coordinator.lastRowsCount = rows.count
+            context.coordinator.pendingReload = false
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -80,6 +100,9 @@ struct CSVEditorTableView: NSViewRepresentable {
         var onPreview: (URL) -> Void
         var onChange: ([[String]]) -> Void
         weak var tableView: NSTableView?
+        var lastHeadersCount: Int = 0
+        var lastRowsCount: Int = 0
+        var pendingReload: Bool = false
         
         init(headers: [String], rows: [[String]], originalColumnIndex: Int, baseURL: URL, onPreview: @escaping (URL) -> Void, onChange: @escaping ([[String]]) -> Void) {
             self.headers = headers
@@ -90,6 +113,10 @@ struct CSVEditorTableView: NSViewRepresentable {
             self.onChange = onChange
         }
         
+        func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
+            true
+        }
+
         func numberOfRows(in tableView: NSTableView) -> Int {
             rows.count
         }
@@ -102,18 +129,22 @@ struct CSVEditorTableView: NSViewRepresentable {
             if let existing = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
                 field = existing
             } else {
-                field = NSTextField()
-                field.isBordered = true
-                field.bezelStyle = .roundedBezel
-                field.drawsBackground = true
-                field.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-                field.delegate = self
-                field.identifier = identifier
-                field.isEditable = true
-                field.isSelectable = true
-                field.usesSingleLineMode = true
-                field.lineBreakMode = .byTruncatingMiddle
-                field.cell?.isScrollable = true
+                let tf = NSTextField()
+                tf.isBordered = true
+                tf.bezelStyle = .roundedBezel
+                tf.drawsBackground = true
+                tf.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+                tf.delegate = self
+                tf.identifier = identifier
+                tf.isEditable = true
+                tf.isSelectable = true
+                tf.usesSingleLineMode = true
+                tf.lineBreakMode = .byTruncatingMiddle
+                tf.cell?.isScrollable = true
+                // Allow tab/enter to commit and advance
+                tf.target = self
+                tf.action = #selector(commitAndAdvance(_:))
+                field = tf
             }
             let value = safeValue(row: row, col: colIndex)
             field.stringValue = value
@@ -147,6 +178,23 @@ struct CSVEditorTableView: NSViewRepresentable {
             guard !name.isEmpty else { return }
             let url = resolveURL(for: name)
             onPreview(url)
+        }
+
+        @objc private func commitAndAdvance(_ sender: NSTextField) {
+            let row = sender.tag >> 16
+            let col = sender.tag & 0xFFFF
+            setValue(sender.stringValue, row: row, col: col)
+            onChange(rows)
+            guard let tv = tableView else { return }
+            let nextCol = min(col + 1, (tv.tableColumns.count - 1))
+            tv.editColumn(nextCol, row: row, with: nil, select: true)
+        }
+        @objc func didClick(_ sender: Any?) {
+            guard let tv = tableView else { return }
+            let row = tv.clickedRow
+            let col = tv.clickedColumn
+            guard row >= 0, col >= 0 else { return }
+            tv.editColumn(col, row: row, with: nil, select: true)
         }
         
         private func safeValue(row: Int, col: Int) -> String {

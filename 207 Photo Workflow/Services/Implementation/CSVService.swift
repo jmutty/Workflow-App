@@ -8,8 +8,8 @@ class CSVService: CSVServiceProtocol {
     private let maxColumns = 100
     private let chunkSize = 65536 // 64KB chunks for streaming
     
-    // Common delimiters to try
-    private let possibleDelimiters = [",", "\t", ";", "|", ":"]
+    // Common delimiters to try (restricted to comma and semicolon per app needs)
+    private let possibleDelimiters = [",", ";"]
     
     // MARK: - Public Methods
     
@@ -256,95 +256,133 @@ class CSVService: CSVServiceProtocol {
         let sampleLines = content.components(separatedBy: .newlines)
             .prefix(10)
             .filter { !$0.isEmpty }
-        
+
         guard !sampleLines.isEmpty else {
             return ","
         }
-        
-        // Count occurrences of each delimiter
-        var delimiterCounts: [String: [Int]] = [:]
-        
-        for delimiter in possibleDelimiters {
-            delimiterCounts[delimiter] = sampleLines.map { line in
-                line.components(separatedBy: delimiter).count - 1
+
+        // Evaluate three candidates: comma only, semicolon only, both
+        enum Candidate: String, CaseIterable { case comma = ",", semicolon = ";", both = ",;" }
+
+        struct CandidateScore { let candidate: Candidate; let headerCols: Int; let matchRatio: Double }
+
+        var scores: [CandidateScore] = []
+        for candidate in Candidate.allCases {
+            guard let header = sampleLines.first else { continue }
+
+            let headerCols: Int = {
+                switch candidate {
+                case .comma:
+                    return parseCSVLine(header, delimiters: [","]).count
+                case .semicolon:
+                    return parseCSVLine(header, delimiters: [";"]).count
+                case .both:
+                    return parseCSVLine(header, delimiters: [",", ";"]).count
+                }
+            }()
+
+            if headerCols == 0 { continue }
+
+            let rows = Array(sampleLines.dropFirst())
+            if rows.isEmpty {
+                scores.append(CandidateScore(candidate: candidate, headerCols: headerCols, matchRatio: headerCols >= Constants.CSV.minFieldCount ? 1.0 : 0.0))
+                continue
             }
-        }
-        
-        // Find delimiter with most consistent count across lines
-        var bestDelimiter = ","
-        var bestScore = 0.0
-        
-        for (delimiter, counts) in delimiterCounts {
-            guard !counts.isEmpty, counts.max() ?? 0 > 0 else { continue }
-            
-            // Calculate consistency score (lower variance is better)
-            let mean = Double(counts.reduce(0, +)) / Double(counts.count)
-            let variance = counts.map { pow(Double($0) - mean, 2) }.reduce(0, +) / Double(counts.count)
-            
-            // Score based on mean count and consistency
-            let score = mean / (variance + 1.0)
-            
-            if score > bestScore {
-                bestScore = score
-                bestDelimiter = delimiter
+
+            let matches: Int = rows.reduce(0) { acc, line in
+                let cols: Int
+                switch candidate {
+                case .comma:
+                    cols = parseCSVLine(line, delimiters: [","]).count
+                case .semicolon:
+                    cols = parseCSVLine(line, delimiters: [";"]).count
+                case .both:
+                    cols = parseCSVLine(line, delimiters: [",", ";"]).count
+                }
+                return acc + (cols == headerCols ? 1 : 0)
             }
+
+            let ratio = Double(matches) / Double(rows.count)
+            scores.append(CandidateScore(candidate: candidate, headerCols: headerCols, matchRatio: ratio))
         }
-        
-        return bestDelimiter
+
+        // Choose the candidate with highest match ratio; tie-breaker prefers 'both', then higher headerCols
+        guard let best = scores.sorted(by: { (a, b) -> Bool in
+            if a.matchRatio != b.matchRatio { return a.matchRatio > b.matchRatio }
+            if a.candidate == .both && b.candidate != .both { return true }
+            if b.candidate == .both && a.candidate != .both { return false }
+            return a.headerCols > b.headerCols
+        }).first else {
+            return ","
+        }
+
+        return best.candidate.rawValue
     }
     
     // MARK: - Private Methods
     
     private func parseCSVLine(_ line: String, delimiter: String) -> [String] {
+        // Map special ",;" token to both delimiters
+        let delimiters: Set<Character>
+        if delimiter == ",;" {
+            delimiters = [",", ";"]
+        } else if let first = delimiter.first {
+            delimiters = [first]
+        } else {
+            delimiters = [","]
+        }
+        return parseCSVLine(line, delimiters: delimiters)
+    }
+
+    private func parseCSVLine(_ line: String, delimiters: Set<Character>) -> [String] {
         var result: [String] = []
         var currentField = ""
         var inQuotes = false
-        var previousChar: Character?
-        
-        for char in line {
+
+        let characters = Array(line)
+        var index = 0
+
+        while index < characters.count {
+            let char = characters[index]
+
             if char == "\"" {
                 if inQuotes {
-                    // Check if this is an escaped quote
-                    if previousChar == "\"" {
-                        currentField.append(char)
-                        previousChar = nil
-                        continue
+                    // If next char is also a quote, it's an escaped quote
+                    if index + 1 < characters.count && characters[index + 1] == "\"" {
+                        currentField.append("\"")
+                        index += 1 // Skip the escaped quote
                     } else {
-                        // Could be end of quoted field
-                        previousChar = char
-                        continue
+                        // End of quoted field
+                        inQuotes = false
                     }
                 } else {
                     // Start of quoted field
                     inQuotes = true
                 }
-            } else if String(char) == delimiter && !inQuotes {
+            } else if !inQuotes && delimiters.contains(char) {
                 // End of field
                 result.append(cleanField(currentField))
                 currentField = ""
-                previousChar = nil
             } else {
                 // Regular character
-                if previousChar == "\"" && !inQuotes {
-                    // The previous quote was closing quote
-                    inQuotes = false
-                }
                 currentField.append(char)
-                previousChar = char
             }
+
+            index += 1
         }
-        
-        // Don't forget the last field
-        if previousChar == "\"" {
-            inQuotes = false
-        }
+
+        // Append the last field
         result.append(cleanField(currentField))
-        
+
         return result
     }
     
     private func cleanField(_ field: String) -> String {
         var cleaned = field.trimmingCharacters(in: .whitespaces)
+        // Strip UTF-8 BOM if present at start of first field/line
+        if cleaned.hasPrefix(Constants.CSV.bomPrefix) {
+            cleaned = String(cleaned.dropFirst(Constants.CSV.bomPrefix.count))
+        }
         
         // Remove surrounding quotes if present
         if cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"") && cleaned.count >= 2 {

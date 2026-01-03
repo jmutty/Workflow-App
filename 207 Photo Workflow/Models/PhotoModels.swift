@@ -47,6 +47,7 @@ struct CoachFile: Identifiable {
     let destinationFolder: URL
     let destinationPath: String
     let newName: String?
+    let isManager: Bool
     
     var finalName: String {
         newName ?? originalName
@@ -62,7 +63,7 @@ struct CoachFile: Identifiable {
 }
 
 // MARK: - Rename Operation
-struct RenameOperation: Identifiable {
+struct RenameOperation: Identifiable, Equatable {
     let id = UUID()
     let originalName: String
     let newName: String
@@ -70,6 +71,10 @@ struct RenameOperation: Identifiable {
     let sourceURL: URL
     
     var conflictResolution: ConflictResolution?
+    
+    static func == (lhs: RenameOperation, rhs: RenameOperation) -> Bool {
+        lhs.id == rhs.id
+    }
     
     enum ConflictResolution {
         case skip
@@ -104,6 +109,7 @@ struct CSVRow: Identifiable {
     let firstName: String
     let lastName: String
     let groupName: String
+    let barcode: String?
     
     var fullName: String {
         "\(firstName) \(lastName)".trimmingCharacters(in: .whitespaces)
@@ -115,10 +121,16 @@ struct CSVRow: Identifiable {
 }
 
 // MARK: - Validation Models
-struct PoseCountValidation {
+struct PoseCountValidation: Equatable {
     let expectedCount: Int
     let playersWithIssues: [(player: String, count: Int)]
     let totalPlayers: Int
+    
+    static func == (lhs: PoseCountValidation, rhs: PoseCountValidation) -> Bool {
+        lhs.expectedCount == rhs.expectedCount &&
+        lhs.totalPlayers == rhs.totalPlayers &&
+        lhs.playersWithIssues.count == rhs.playersWithIssues.count
+    }
     
     var hasIssues: Bool {
         !playersWithIssues.isEmpty
